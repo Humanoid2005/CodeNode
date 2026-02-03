@@ -1,0 +1,49 @@
+# Custom Judge0 image with pre-installed Python packages
+# Based on Judge0 CE official image
+
+FROM judge0/judge0:1.13.0
+
+# Switch to root user to install packages
+USER root
+
+# Fix Debian Buster repos and install pip with Python 3.7 compatible packages
+RUN sed -i 's/http:\/\/deb.debian.org/http:\/\/archive.debian.org/g' /etc/apt/sources.list && \
+    sed -i 's/http:\/\/security.debian.org/http:\/\/archive.debian.org/g' /etc/apt/sources.list && \
+    sed -i '/buster-updates/d' /etc/apt/sources.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends python3-pip && \
+    python3 -m pip install --upgrade pip --no-cache-dir && \
+    python3 -m pip install --no-cache-dir \
+    numpy==1.21.6 \
+    pandas==1.3.5 \
+    requests==2.28.2 \
+    matplotlib==3.5.3 \
+    scipy==1.7.3 \
+    scikit-learn==1.0.2 \
+    beautifulsoup4==4.11.2 \
+    lxml==4.9.3 \
+    pillow==9.5.0 \
+    flask==2.2.5 \
+    django==3.2.20 \
+    sqlalchemy==1.4.49 \
+    python-dotenv==0.21.0 \
+    pydantic==1.10.12 \
+    pytest==7.4.0 \
+    black==22.12.0 \
+    pytz==2023.3 && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Add more packages as needed:
+# RUN pip3 install --no-cache-dir package_name==version
+
+# Switch back to judge0 user for security
+USER judge0
+
+# Build this image with:
+# docker build -f Dockerfile.custom-judge0 -t custom-judge0:latest .
+#
+# Then update your Judge0 docker-compose.yml worker service to use:
+# image: custom-judge0:latest
+#
+# And restart with:
+# docker-compose down && docker-compose up -d

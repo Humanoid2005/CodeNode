@@ -1,6 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import AceEditor from 'react-ace';
 import 'ace-builds/src-noconflict/mode-python';
+import 'ace-builds/src-noconflict/mode-javascript';
+import 'ace-builds/src-noconflict/mode-c_cpp';
 import 'ace-builds/src-noconflict/theme-monokai';
 import 'ace-builds/src-noconflict/ext-language_tools';
 import { executeCodeWithSSE } from '../services/api';
@@ -17,33 +19,86 @@ interface LogMessage {
   message: string;
 }
 
-const DEFAULT_CODE = `# Welcome to CodeNode - Secure Python Executor
-# 
-# Features:
-# - Docker containerized execution
-# - Dependency management
-# - Environment variables/secrets support
-# - Real-time execution feedback
-#
-# Example: Using environment variables
+const CODE_TEMPLATES: Record<string, string> = {
+  python: `# Welcome to CodeNode - Python Executor
+# Access environment variables
 import os
 
-# Access secrets/environment variables
 api_key = os.environ.get("API_KEY", "not_set")
 print(f"API Key: {api_key}")
 
-# Example with dependencies
-# Add 'requests' to dependencies below, then run:
+# Example with dependencies (add 'requests' to dependencies):
 # import requests
 # response = requests.get('https://api.github.com')
 # print(f"GitHub API Status: {response.status_code}")
 
-print("Hello from CodeNode!")
+print("Hello from Python!")
 print("Your code runs in an isolated Docker container.")
-`;
+`,
+  javascript: `// Welcome to CodeNode - JavaScript Executor
+// Access environment variables
+const apiKey = process.env.API_KEY || 'not_set';
+console.log(\`API Key: \${apiKey}\`);
+
+// Example with dependencies (add 'axios' to dependencies):
+// const axios = require('axios');
+// axios.get('https://api.github.com')
+//   .then(response => console.log(\`GitHub API Status: \${response.status}\`))
+//   .catch(err => console.error(err.message));
+
+console.log("Hello from JavaScript!");
+console.log("Your code runs in an isolated Docker container.");
+`,
+  c: `// Welcome to CodeNode - C Executor
+// Note: C doesn't have direct environment variable access like Python/JS
+// but you can use getenv() from stdlib.h
+#include <stdio.h>
+#include <stdlib.h>
+
+int main() {
+    // Access environment variable
+    char *api_key = getenv("API_KEY");
+    if (api_key != NULL) {
+        printf("API Key: %s\\n", api_key);
+    } else {
+        printf("API Key: not_set\\n");
+    }
+    
+    printf("Hello from C!\\n");
+    printf("Your code runs in an isolated Docker container.\\n");
+    
+    return 0;
+}
+`,
+  cpp: `// Welcome to CodeNode - C++ Executor
+#include <iostream>
+#include <cstdlib>
+#include <string>
+
+int main() {
+    // Access environment variable
+    const char* api_key = std::getenv("API_KEY");
+    std::string key_value = api_key ? api_key : "not_set";
+    
+    std::cout << "API Key: " << key_value << std::endl;
+    std::cout << "Hello from C++!" << std::endl;
+    std::cout << "Your code runs in an isolated Docker container." << std::endl;
+    
+    return 0;
+}
+`
+};
+
+const DEPENDENCY_PLACEHOLDERS: Record<string, string> = {
+  python: "requests, pandas, numpy",
+  javascript: "axios, express, lodash",
+  c: "No package manager for C",
+  cpp: "No package manager for C++"
+};
 
 const CodeNodePopup: React.FC = () => {
-  const [code, setCode] = useState<string>(DEFAULT_CODE);
+  const [language, setLanguage] = useState<string>('python');
+  const [code, setCode] = useState<string>(CODE_TEMPLATES['python']);
   const [dependencies, setDependencies] = useState<string>('');
   const [secrets, setSecrets] = useState<Secret[]>([{ key: 'API_KEY', value: 'my-secret-key-123' }]);
   const [logs, setLogs] = useState<LogMessage[]>([]);
@@ -51,6 +106,12 @@ const CodeNodePopup: React.FC = () => {
   // const [encryptionKey, setEncryptionKey] = useState<string>('');
   const [showSecrets, setShowSecrets] = useState<boolean>(false);
   const [enableNetwork, setEnableNetwork] = useState<boolean>(false);
+
+  // Update code template when language changes
+  useEffect(() => {
+    setCode(CODE_TEMPLATES[language]);
+    setDependencies('');
+  }, [language]);
 
   // Skip encryption for now - commented out
   // useEffect(() => {
@@ -131,7 +192,7 @@ const CodeNodePopup: React.FC = () => {
           dependencies: depsList,
           secrets: secretsObj,
           // encrypted_secrets: encryptedSecrets,
-          language: 'python',
+          language: language,
           enable_network: enableNetwork,
         },
         {
@@ -156,7 +217,7 @@ const CodeNodePopup: React.FC = () => {
   };
 
   const handleReset = () => {
-    setCode(DEFAULT_CODE);
+    setCode(CODE_TEMPLATES[language]);
     setDependencies('');
     setSecrets([{ key: 'API_KEY', value: 'my-secret-key-123' }]);
     clearLogs();
@@ -209,11 +270,21 @@ const CodeNodePopup: React.FC = () => {
         <div className="editor-section">
           <div className="section-header">
             <span className="section-title">Code Editor</span>
-            <span className="language-tag">Python 3.11</span>
+            <select 
+              className="language-selector"
+              value={language}
+              onChange={(e) => setLanguage(e.target.value)}
+              disabled={isExecuting}
+            >
+              <option value="python">Python 3.11</option>
+              <option value="javascript">JavaScript (Node.js 20)</option>
+              <option value="c">C (GCC)</option>
+              <option value="cpp">C++ (GCC)</option>
+            </select>
           </div>
           <div className="editor-wrapper">
             <AceEditor
-              mode="python"
+              mode={language === 'python' ? 'python' : language === 'javascript' ? 'javascript' : 'c_cpp'}
               theme="monokai"
               value={code}
               onChange={setCode}
@@ -239,15 +310,19 @@ const CodeNodePopup: React.FC = () => {
           <div className="config-section">
             <div className="config-header">
               <span className="config-title">📦 Dependencies</span>
-              <span className="config-hint">Comma-separated (e.g., requests, pandas, numpy)</span>
+              <span className="config-hint">
+                {language === 'python' || language === 'javascript' 
+                  ? 'Comma-separated (e.g., ' + DEPENDENCY_PLACEHOLDERS[language] + ')' 
+                  : 'Not available for ' + language.toUpperCase()}
+              </span>
             </div>
             <input
               type="text"
               className="config-input"
-              placeholder="requests, pandas, numpy"
+              placeholder={DEPENDENCY_PLACEHOLDERS[language]}
               value={dependencies}
               onChange={(e) => setDependencies(e.target.value)}
-              disabled={isExecuting}
+              disabled={isExecuting || language === 'c' || language === 'cpp'}
             />
           </div>
 
