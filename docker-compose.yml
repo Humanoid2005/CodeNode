@@ -1,0 +1,128 @@
+# Docker Compose for Judge0 + Network Filter Proxy
+# Run locally: docker-compose up -d
+# Backend and frontend are run locally (npm run dev / uvicorn)
+# Project name: judge0 (use: docker-compose -p judge0 up -d)
+
+version: "3.8"
+
+x-logging: &default-logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  # ===================
+  # Network Filter Proxy
+  # ===================
+  filter-proxy:
+    image: mitmproxy/mitmproxy:10.1.1
+    container_name: judge0-filter-proxy
+    command: mitmdump -s /scripts/filter_addon.py --mode regular --listen-host 0.0.0.0 --listen-port 8080 --set block_global=false
+    volumes:
+      - ./server/proxy/filter_addon.py:/scripts/filter_addon.py:ro
+    networks:
+      - judge0-network
+    restart: unless-stopped
+    <<: *default-logging
+
+  # ===================
+  # Judge0 CE Server (with cgroup v2 support)
+  # ===================
+  judge0-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.judge0-cg2
+    image: judge0-cg2:local
+    container_name: judge0-server
+    volumes:
+      - ./judge0.conf:/judge0.conf:ro
+      # Mount cgroup v2 filesystem
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    ports:
+      - "2358:2358"
+    privileged: true
+    environment:
+      # Proxy configuration - route all HTTP traffic through filter-proxy
+      - HTTP_PROXY=http://filter-proxy:8080
+      - HTTPS_PROXY=http://filter-proxy:8080
+      - http_proxy=http://filter-proxy:8080
+      - https_proxy=http://filter-proxy:8080
+    networks:
+      - judge0-network
+    depends_on:
+      - judge0-db
+      - judge0-redis
+      - filter-proxy
+    restart: unless-stopped
+    <<: *default-logging
+
+  # ===================
+  # Judge0 Workers (with cgroup v2 support)
+  # ===================
+  judge0-workers:
+    build:
+      context: .
+      dockerfile: Dockerfile.judge0-cg2
+    image: judge0-cg2:local
+    container_name: judge0-workers
+    command: ["./scripts/workers"]
+    volumes:
+      - ./judge0.conf:/judge0.conf:ro
+      # Mount cgroup v2 filesystem
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    privileged: true
+    environment:
+      # Proxy configuration - route all HTTP traffic through filter-proxy
+      - HTTP_PROXY=http://filter-proxy:8080
+      - HTTPS_PROXY=http://filter-proxy:8080
+      - http_proxy=http://filter-proxy:8080
+      - https_proxy=http://filter-proxy:8080
+    networks:
+      - judge0-network
+    depends_on:
+      - judge0-server
+      - filter-proxy
+    restart: unless-stopped
+    <<: *default-logging
+
+  # ===================
+  # Judge0 PostgreSQL Database
+  # ===================
+  judge0-db:
+    image: postgres:16.1
+    container_name: judge0-db
+    environment:
+      - POSTGRES_HOST_AUTH_METHOD=trust
+      - POSTGRES_DB=judge0
+      - POSTGRES_USER=judge0
+      - POSTGRES_PASSWORD=judge0password
+    volumes:
+      - judge0-postgres-data:/var/lib/postgresql/data
+    networks:
+      - judge0-network
+    restart: unless-stopped
+    <<: *default-logging
+
+  # ===================
+  # Judge0 Redis
+  # ===================
+  judge0-redis:
+    image: redis:7.2.3
+    container_name: judge0-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - judge0-redis-data:/data
+    networks:
+      - judge0-network
+    restart: unless-stopped
+    <<: *default-logging
+
+networks:
+  judge0-network:
+    driver: bridge
+
+volumes:
+  judge0-postgres-data:
+  judge0-redis-data:

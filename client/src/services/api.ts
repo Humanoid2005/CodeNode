@@ -5,13 +5,20 @@ import { encryptSecrets, isEncryptionSupported, EncryptionKeyInfo } from '../uti
 // Cache the encryption key to avoid fetching it on every request
 let cachedKeyInfo: EncryptionKeyInfo | null = null;
 
+export interface NetworkConfig {
+  enabled: boolean;  // Enable/disable network access entirely
+  restricted: boolean;  // If true, only allow hosts in allowed_hosts
+  allowed_hosts: string[];  // List of allowed domains/IPs
+}
+
 export interface CodeExecutionRequest {
   code: string;
   dependencies: string[];
   secrets: Record<string, string>;
   encrypted_secrets?: string;
   language: string;
-  enable_network?: boolean;  // Optional: enable network access in container
+  enable_network?: boolean;  // Deprecated, use network_config
+  network_config?: NetworkConfig;  // Network filtering configuration
 }
 
 export interface LogMessage {
@@ -80,6 +87,11 @@ export const executeCodeWithSSE = async (
       language: request.language,
       enable_network: request.enable_network,
     };
+    
+    // Add network_config if provided
+    if (request.network_config) {
+      payload.network_config = request.network_config;
+    }
     
     // Encrypt secrets if there are any
     const hasSecrets = request.secrets && Object.keys(request.secrets).some(k => request.secrets[k]);

@@ -1,16 +1,36 @@
 """
 Judge0 Service using REST API
-Handles code execution using Judge0 REST API
+Handles code execution using self-hosted Judge0 REST API
 """
 import os
 import base64
 import time
+import json
 import requests
 from typing import Dict, List, Optional
+from dataclasses import dataclass
 
+
+@dataclass
+class NetworkConfig:
+    """Network configuration for code execution"""
+    enabled: bool = True
+    restricted: bool = False
+    allowed_hosts: List[str] = None
+    
+    def __post_init__(self):
+        if self.allowed_hosts is None:
+            self.allowed_hosts = []
+    
+    def to_dict(self) -> Dict:
+        return {
+            "enabled": self.enabled,
+            "restricted": self.restricted,
+            "allowed_hosts": self.allowed_hosts,
+        }
 
 class Judge0Service:
-    """Service for interacting with Judge0 using REST API"""
+    """Service for interacting with self-hosted Judge0 using REST API"""
     
     # Language ID mapping for Judge0 API (using active/non-archived IDs)
     LANGUAGE_IDS = {
@@ -50,11 +70,135 @@ class Judge0Service:
             "python_ml": 71,   # Python 3.8.1
         }
     
-    
     def _get_language_id(self, language_name: str) -> Optional[int]:
         """Get Judge0 language ID from language name"""
         return self.language_map.get(language_name.lower())
     
+    def _inject_network_config(self, source_code: str, language: str, network_config: 'NetworkConfig') -> str:
+        """
+        Inject code that blocks network requests not in allowlist.
+        Uses monkey-patching to intercept requests before they're made.
+        
+        Args:
+            source_code: Original user code
+            language: Programming language
+            network_config: Network configuration object
+            
+        Returns:
+            Modified source code with network filtering
+        """
+        if not network_config:
+            return source_code
+        
+        # If network is disabled entirely, don't inject anything
+        # Judge0's enable_network=false will handle blocking
+        if not network_config.enabled:
+            return source_code
+        
+        # If not restricted, allow all - no injection needed
+        if not network_config.restricted:
+            return source_code
+        
+        # Network is enabled but restricted - inject allowlist checking
+        allowed_hosts = network_config.allowed_hosts or []
+        allowed_hosts_str = json.dumps(allowed_hosts)
+        
+        language = language.lower()
+        
+        if language in ['python', 'python_ml']:
+            # Inject Python code to filter requests
+            network_patch = f'''# === Network Filter (auto-generated) ===
+_ALLOWED_HOSTS = {allowed_hosts_str}
+
+def _check_url_allowed(url):
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url)
+        host = parsed.netloc.split(':')[0]  # Remove port
+        if host in _ALLOWED_HOSTS:
+            return True
+        # Check if it's a subdomain of an allowed host
+        for allowed in _ALLOWED_HOSTS:
+            if host.endswith('.' + allowed):
+                return True
+        raise ConnectionError(f"Network request to '{{host}}' blocked. Allowed hosts: {{_ALLOWED_HOSTS}}")
+    except ConnectionError:
+        raise
+    except:
+        raise ConnectionError(f"Invalid URL: {{url}}")
+
+# Patch requests library
+try:
+    import requests as _req
+    _orig_request = _req.Session.request
+    def _filtered_request(self, method, url, **kwargs):
+        _check_url_allowed(url)
+        return _orig_request(self, method, url, **kwargs)
+    _req.Session.request = _filtered_request
+except ImportError:
+    pass
+
+# Patch urllib
+try:
+    import urllib.request as _urllib
+    _orig_urlopen = _urllib.urlopen
+    def _filtered_urlopen(url, *args, **kwargs):
+        url_str = url.full_url if hasattr(url, 'full_url') else str(url)
+        _check_url_allowed(url_str)
+        return _orig_urlopen(url, *args, **kwargs)
+    _urllib.urlopen = _filtered_urlopen
+except:
+    pass
+# === End Network Filter ===
+
+'''
+            return network_patch + source_code
+            
+        elif language == 'javascript':
+            allowed_hosts_js = json.dumps(allowed_hosts)
+            network_patch = f'''// === Network Filter (auto-generated) ===
+const _ALLOWED_HOSTS = {allowed_hosts_js};
+function _checkUrlAllowed(url) {{
+    try {{
+        const parsed = new URL(url);
+        const host = parsed.hostname;
+        if (_ALLOWED_HOSTS.includes(host)) return true;
+        for (const allowed of _ALLOWED_HOSTS) {{
+            if (host.endsWith('.' + allowed)) return true;
+        }}
+        throw new Error(`Network request to '${{host}}' blocked. Allowed: ${{_ALLOWED_HOSTS}}`);
+    }} catch (e) {{
+        if (e.message.includes('blocked')) throw e;
+        throw new Error(`Invalid URL: ${{url}}`);
+    }}
+}}
+
+// Patch fetch
+if (typeof fetch !== 'undefined') {{
+    const _origFetch = fetch;
+    global.fetch = (url, opts) => {{ _checkUrlAllowed(url.toString()); return _origFetch(url, opts); }};
+}}
+
+// Patch http/https
+['http', 'https'].forEach(p => {{
+    try {{
+        const m = require(p);
+        const _orig = m.request;
+        m.request = (opts, cb) => {{
+            const url = typeof opts === 'string' ? opts : `${{p}}://${{opts.hostname || opts.host}}`;
+            _checkUrlAllowed(url);
+            return _orig(opts, cb);
+        }};
+    }} catch(e) {{}}
+}});
+// === End Network Filter ===
+
+'''
+            return network_patch + source_code
+        
+        # For other languages, return as-is (no filtering)
+        return source_code
+
     def _inject_env_vars(self, source_code: str, language: str, env_vars: Optional[Dict[str, str]]) -> str:
         """
         Inject environment variables into source code based on language
@@ -166,29 +310,37 @@ class Judge0Service:
         stdin: str = "",
         requirements: Optional[str] = None,
         env_vars: Optional[Dict[str, str]] = None,
+        network_config: Optional[NetworkConfig] = None,
     ) -> Dict:
-        """Execute code using Judge0 API directly"""
+        """Execute code using self-hosted Judge0 API"""
         # Get language ID
         lang_id = self._get_language_id(language)
         if lang_id is None:
             raise ValueError(f"Unsupported language: {language}")
         
-        # Inject environment variables into the code
-        code_to_execute = self._inject_env_vars(source_code, language, env_vars)
+        code_to_execute = source_code
         
-        # Prepare request payload (plain text, no base64)
+        # Handle network configuration - inject config directly into headers
+        if network_config and network_config.enabled:
+            code_to_execute = self._inject_network_config(code_to_execute, language, network_config)
+        
+        # Inject environment variables into the code
+        code_to_execute = self._inject_env_vars(code_to_execute, language, env_vars)
+        
+        # Prepare request payload
         payload = {
             "source_code": code_to_execute,
             "language_id": lang_id,
+            # Control network access via Judge0's enable_network flag
+            # Default is false (set in judge0.conf), only enable if explicitly requested
+            "enable_network": network_config.enabled if network_config else False,
         }
-        
         if stdin:
             payload["stdin"] = stdin
         
         # Submit code to Judge0
         try:
-            judge0_url = os.getenv("JUDGE0_URL", "http://localhost:2358")
-            submit_url = f"{judge0_url}/submissions"
+            submit_url = f"{self.judge0_url}/submissions"
             
             response = requests.post(submit_url, json=payload)
             
@@ -196,18 +348,17 @@ class Judge0Service:
                 error_detail = response.text
                 raise RuntimeError(f"Judge0 submission failed (status {response.status_code}): {error_detail}")
             
-            submission = response.json()
-            token = submission.get("token")
+            result = response.json()
+            token = result.get("token")
             if not token:
-                raise ValueError(f"No token received from Judge0. Response: {submission}")
+                raise ValueError(f"No token received from Judge0. Response: {result}")
             
             # Poll for result with longer timeout
             max_attempts = 600  # 60 seconds timeout (0.1s per attempt)
             attempt = 0
-            result = None
             
             while attempt < max_attempts:
-                result_url = f"{judge0_url}/submissions/{token}"
+                result_url = f"{self.judge0_url}/submissions/{token}"
                 result_response = requests.get(result_url)
                 
                 if result_response.status_code != 200:
@@ -226,7 +377,6 @@ class Judge0Service:
             if not result:
                 raise RuntimeError("Failed to get submission result")
             
-            # Get response fields (plain text, no base64 decoding needed)
             stdout = result.get("stdout") or ""
             stderr = result.get("stderr") or ""
             compile_output = result.get("compile_output") or ""
@@ -255,6 +405,7 @@ class Judge0Service:
         test_cases: List[tuple],
         requirements: Optional[str] = None,
         env_vars: Optional[Dict[str, str]] = None,
+        network_config: Optional[NetworkConfig] = None,
     ) -> List[Dict]:
         """
         Execute code with multiple test cases
@@ -265,6 +416,7 @@ class Judge0Service:
             test_cases: List of (input, expected_output) tuples
             requirements: Dependencies (not supported in Judge0 CE)
             env_vars: Environment variables to set
+            network_config: Network configuration for filtering
         
         Returns:
             List of execution results for each test case
@@ -282,7 +434,8 @@ class Judge0Service:
                 language=language,
                 stdin=test_input or "",
                 requirements=None,  # Not supported
-                env_vars=env_vars,  # Pass environment variables
+                env_vars=env_vars,
+                network_config=network_config,
             )
             results.append(result)
         

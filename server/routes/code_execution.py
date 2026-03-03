@@ -5,8 +5,9 @@ from pydantic import BaseModel, Field
 from typing import Optional, List, Union
 import json
 import logging
+import re
 
-from services.judge0_service import Judge0Service
+from services.judge0_service import Judge0Service, NetworkConfig
 from services.crypto_service import get_crypto_service
 
 # Configure logging
@@ -18,14 +19,56 @@ router = APIRouter()
 judge0_service = Judge0Service()
 
 
+# Regex patterns for validating hosts
+_DOMAIN_PATTERN = re.compile(
+    r'^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$'
+)
+_IPV4_PATTERN = re.compile(
+    r'^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'
+)
+
+
+def _is_valid_host(host: str) -> bool:
+    """
+    Validate that a host is a valid domain name or IPv4 address.
+    No wildcards allowed.
+    
+    Args:
+        host: The hostname or IP to validate
+        
+    Returns:
+        True if valid, False otherwise
+    """
+    if not host or len(host) > 253:
+        return False
+    
+    # Check if it's a valid domain name
+    if _DOMAIN_PATTERN.match(host):
+        return True
+    
+    # Check if it's a valid IPv4 address
+    if _IPV4_PATTERN.match(host):
+        return True
+    
+    return False
+
+
+class NetworkConfigRequest(BaseModel):
+    """Network configuration for code execution"""
+    enabled: bool = True  # Enable/disable network access entirely
+    restricted: bool = False  # If True, only allow hosts in allowed_hosts
+    allowed_hosts: List[str] = Field(default_factory=list)  # List of allowed domains/IPs
+
+
 class CodeExecutionRequest(BaseModel):
     code: str
     language: str = "python"
     dependencies: List[str] = Field(default_factory=list)  # List of package names
     secrets: dict = Field(default_factory=dict)  # Environment variables/secrets
     encrypted_secrets: Optional[str] = None  # Encrypted secrets (for future use)
-    enable_network: bool = False  # Enable network access in container
+    enable_network: bool = True  # Enable network access (deprecated, use network_config)
     stdin: Optional[str] = None  # Standard input for the program
+    network_config: Optional[NetworkConfigRequest] = None  # Network filtering configuration
 
 
 class TestCase(BaseModel):
@@ -39,7 +82,8 @@ class CodeExecutionWithTestsRequest(BaseModel):
     test_cases: List[Union[TestCase, tuple, list]]
     dependencies: List[str] = Field(default_factory=list)  # List of package names
     secrets: dict = Field(default_factory=dict)  # Environment variables/secrets
-    enable_network: bool = False  # Enable network access
+    enable_network: bool = True  # Enable network access (deprecated, use network_config)
+    network_config: Optional[NetworkConfigRequest] = None  # Network filtering configuration
 
 
 class CodeExecutionResponse(BaseModel):
@@ -108,6 +152,29 @@ async def run_code(request: CodeExecutionRequest):
         if env_vars:
             logger.info(f"Environment variables set: {list(env_vars.keys())}")
         
+        # Build network configuration
+        network_config = None
+        if request.network_config:
+            # Validate allowed_hosts
+            validated_hosts = []
+            for host in request.network_config.allowed_hosts:
+                host = host.strip()
+                if host and _is_valid_host(host):
+                    validated_hosts.append(host)
+                elif host:
+                    logger.warning(f"Invalid host in allowlist: {host}")
+            
+            network_config = NetworkConfig(
+                enabled=request.network_config.enabled,
+                restricted=request.network_config.restricted,
+                allowed_hosts=validated_hosts,
+            )
+            logger.info(f"Network config: enabled={network_config.enabled}, restricted={network_config.restricted}, allowed_hosts={validated_hosts}")
+        elif not request.enable_network:
+            # Backward compatibility: if enable_network is False, disable network
+            network_config = NetworkConfig(enabled=False)
+            logger.info("Network disabled via enable_network=False")
+        
         # Execute code
         logger.debug(f"Executing code for language: {request.language}")
         result = judge0_service.execute_code(
@@ -116,6 +183,7 @@ async def run_code(request: CodeExecutionRequest):
             stdin=stdin,
             requirements=requirements,
             env_vars=env_vars,
+            network_config=network_config,
         )
         
         # Log the execution result status
@@ -163,6 +231,21 @@ async def run_code_with_tests(request: CodeExecutionWithTestsRequest):
         if request.dependencies:
             requirements = "\n".join(request.dependencies)
         
+        # Build network configuration
+        network_config = None
+        if request.network_config:
+            validated_hosts = [
+                host.strip() for host in request.network_config.allowed_hosts
+                if host.strip() and _is_valid_host(host.strip())
+            ]
+            network_config = NetworkConfig(
+                enabled=request.network_config.enabled,
+                restricted=request.network_config.restricted,
+                allowed_hosts=validated_hosts,
+            )
+        elif not request.enable_network:
+            network_config = NetworkConfig(enabled=False)
+        
         # Execute with test cases
         results = judge0_service.execute_with_test_cases(
             source_code=request.code,
@@ -170,6 +253,7 @@ async def run_code_with_tests(request: CodeExecutionWithTestsRequest):
             test_cases=test_cases,
             requirements=requirements,
             env_vars=request.secrets,  # Use secrets as environment variables
+            network_config=network_config,
         )
         
         return {"results": results, "total": len(results)}

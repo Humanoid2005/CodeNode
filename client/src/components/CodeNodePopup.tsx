@@ -105,7 +105,9 @@ const CodeNodePopup: React.FC = () => {
   const [isExecuting, setIsExecuting] = useState<boolean>(false);
   // const [encryptionKey, setEncryptionKey] = useState<string>('');
   const [showSecrets, setShowSecrets] = useState<boolean>(false);
-  const [enableNetwork, setEnableNetwork] = useState<boolean>(false);
+  const [enableNetwork, setEnableNetwork] = useState<boolean>(true);
+  const [restrictNetwork, setRestrictNetwork] = useState<boolean>(false);
+  const [allowedHosts, setAllowedHosts] = useState<string>('');
 
   // Update code template when language changes
   useEffect(() => {
@@ -186,6 +188,16 @@ const CodeNodePopup: React.FC = () => {
     // }
 
     try {
+      // Build network config
+      const networkConfig = {
+        enabled: enableNetwork,
+        restricted: restrictNetwork,
+        allowed_hosts: allowedHosts
+          .split(',')
+          .map(h => h.trim())
+          .filter(h => h.length > 0),
+      };
+
       await executeCodeWithSSE(
         {
           code,
@@ -194,6 +206,7 @@ const CodeNodePopup: React.FC = () => {
           // encrypted_secrets: encryptedSecrets,
           language: language,
           enable_network: enableNetwork,
+          network_config: networkConfig,
         },
         {
           onLog: addLog,
@@ -220,6 +233,9 @@ const CodeNodePopup: React.FC = () => {
     setCode(CODE_TEMPLATES[language]);
     setDependencies('');
     setSecrets([{ key: 'API_KEY', value: 'my-secret-key-123' }]);
+    setEnableNetwork(true);
+    setRestrictNetwork(false);
+    setAllowedHosts('');
     clearLogs();
   };
 
@@ -332,7 +348,12 @@ const CodeNodePopup: React.FC = () => {
               <input
                 type="checkbox"
                 checked={enableNetwork}
-                onChange={(e) => setEnableNetwork(e.target.checked)}
+                onChange={(e) => {
+                  setEnableNetwork(e.target.checked);
+                  if (!e.target.checked) {
+                    setRestrictNetwork(false);
+                  }
+                }}
                 disabled={isExecuting}
               />
               <span className="config-title">🌐 Enable Network Access</span>
@@ -340,6 +361,42 @@ const CodeNodePopup: React.FC = () => {
                 (Required for HTTP requests, API calls, etc.)
               </span>
             </label>
+            
+            {enableNetwork && (
+              <>
+                <label className="network-checkbox" style={{ marginTop: '8px', marginLeft: '20px' }}>
+                  <input
+                    type="checkbox"
+                    checked={restrictNetwork}
+                    onChange={(e) => setRestrictNetwork(e.target.checked)}
+                    disabled={isExecuting}
+                  />
+                  <span className="config-title">🔒 Restrict to Allowed Hosts Only</span>
+                </label>
+                
+                {restrictNetwork && (
+                  <div style={{ marginTop: '8px', marginLeft: '20px' }}>
+                    <div className="config-hint" style={{ marginBottom: '4px' }}>
+                      Comma-separated list of allowed domains/IPs (e.g., api.github.com, 93.184.216.34)
+                    </div>
+                    <input
+                      type="text"
+                      className="config-input"
+                      placeholder="api.github.com, example.com, 192.168.1.1"
+                      value={allowedHosts}
+                      onChange={(e) => setAllowedHosts(e.target.value)}
+                      disabled={isExecuting}
+                      style={{ width: '100%' }}
+                    />
+                    {allowedHosts && (
+                      <div style={{ marginTop: '4px', fontSize: '11px', color: '#888' }}>
+                        Allowed: {allowedHosts.split(',').map(h => h.trim()).filter(h => h).join(', ') || 'None'}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
           </div>
 
           {/* Secrets Section */}
