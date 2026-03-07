@@ -1,36 +1,19 @@
 # Custom Judge0 image with cgroup v2 support
-# This builds isolate from source with cgroup v2 compatibility
 
 FROM judge0/judge0:1.13.1
 
-# Switch to archived Debian repositories (buster is EOL)
 USER root
-RUN sed -i 's/deb.debian.org/archive.debian.org/g' /etc/apt/sources.list && \
-    sed -i 's/security.debian.org/archive.debian.org/g' /etc/apt/sources.list && \
-    sed -i '/stretch-updates/d' /etc/apt/sources.list && \
-    sed -i '/buster-updates/d' /etc/apt/sources.list
 
-# Install build dependencies
-RUN apt-get update && apt-get install -y \
-    git \
-    gcc \
-    make \
-    libcap-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Clone and build isolate with cgroup v2 support
-# Using the latest isolate from upstream which has cgroup v2 support
 WORKDIR /tmp
-RUN git clone https://github.com/ioi/isolate.git && \
-    cd isolate && \
-    git checkout v2.0 && \
+ADD https://github.com/ioi/isolate/archive/refs/tags/v2.0.tar.gz /tmp/isolate-v2.0.tar.gz
+
+RUN tar -xzf /tmp/isolate-v2.0.tar.gz && \
+    cd /tmp/isolate-2.0 && \
     make isolate && \
     cp isolate /usr/local/bin/isolate && \
     chmod 4755 /usr/local/bin/isolate && \
-    cd / && \
-    rm -rf /tmp/isolate
+    rm -rf /tmp/isolate-2.0 /tmp/isolate-v2.0.tar.gz
 
-# Set isolate v2.0 config file
 RUN mkdir -p /usr/local/etc /run/isolate/locks && \
     echo "box_root = /var/local/lib/isolate" > /usr/local/etc/isolate && \
     echo "lock_root = /run/isolate/locks" >> /usr/local/etc/isolate && \
@@ -39,19 +22,9 @@ RUN mkdir -p /usr/local/etc /run/isolate/locks && \
     echo "first_gid = 60000" >> /usr/local/etc/isolate && \
     echo "num_boxes = 1000" >> /usr/local/etc/isolate
 
-# Create box root directory and lock directory
 RUN mkdir -p /var/local/lib/isolate && chmod 755 /var/local/lib/isolate
-
-# Fix sudoers for root
 RUN echo "root ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
-# Patch Judge0 Ruby code to remove --cg-timing option (not supported in isolate v2.0)
-# The cg-timing line generates either --no-cg-timing or --cg-timing, both unsupported in v2.0
 RUN sed -i '/cg-timing/d' /api/app/jobs/isolate_job.rb
-
-# Install common Python packages for code execution
-# Judge0 uses /usr/local/python-3.8.1 for Python 3 (language_id 71)
-RUN /usr/local/python-3.8.1/bin/python3.8 -m pip install --upgrade pip && \
-    /usr/local/python-3.8.1/bin/pip3 install --no-cache-dir requests pillow sympy
 
 WORKDIR /api

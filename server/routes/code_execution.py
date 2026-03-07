@@ -1,74 +1,33 @@
-"""Code execution API routes using Judge0 Python SDK"""
+"""Code execution API routes using Judge0 backend services"""
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List, Union
-import json
 import logging
-import re
 
-from services.judge0_service import Judge0Service, NetworkConfig
 from services.crypto_service import get_crypto_service
+from services.execution_service import ExecutionService
 
-# Configure logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-# Initialize Judge0 service
-judge0_service = Judge0Service()
-
-
-# Regex patterns for validating hosts
-_DOMAIN_PATTERN = re.compile(
-    r'^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$'
-)
-_IPV4_PATTERN = re.compile(
-    r'^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'
-)
-
-
-def _is_valid_host(host: str) -> bool:
-    """
-    Validate that a host is a valid domain name or IPv4 address.
-    No wildcards allowed.
-    
-    Args:
-        host: The hostname or IP to validate
-        
-    Returns:
-        True if valid, False otherwise
-    """
-    if not host or len(host) > 253:
-        return False
-    
-    # Check if it's a valid domain name
-    if _DOMAIN_PATTERN.match(host):
-        return True
-    
-    # Check if it's a valid IPv4 address
-    if _IPV4_PATTERN.match(host):
-        return True
-    
-    return False
+execution_service = ExecutionService()
 
 
 class NetworkConfigRequest(BaseModel):
-    """Network configuration for code execution"""
-    enabled: bool = True  # Enable/disable network access entirely
-    restricted: bool = False  # If True, only allow hosts in allowed_hosts
-    allowed_hosts: List[str] = Field(default_factory=list)  # List of allowed domains/IPs
+    enabled: bool = True
+    restricted: bool = False
+    allowed_hosts: List[str] = Field(default_factory=list)
 
 
 class CodeExecutionRequest(BaseModel):
     code: str
     language: str = "python"
-    dependencies: List[str] = Field(default_factory=list)  # List of package names
-    secrets: dict = Field(default_factory=dict)  # Environment variables/secrets
-    encrypted_secrets: Optional[str] = None  # Encrypted secrets (for future use)
-    enable_network: bool = True  # Enable network access (deprecated, use network_config)
-    stdin: Optional[str] = None  # Standard input for the program
-    network_config: Optional[NetworkConfigRequest] = None  # Network filtering configuration
+    dependencies: List[str] = Field(default_factory=list)
+    secrets: dict = Field(default_factory=dict)
+    encrypted_secrets: Optional[str] = None
+    enable_network: bool = True
+    stdin: Optional[str] = None
+    network_config: Optional[NetworkConfigRequest] = None
 
 
 class TestCase(BaseModel):
@@ -80,10 +39,10 @@ class CodeExecutionWithTestsRequest(BaseModel):
     code: str
     language: str = "python"
     test_cases: List[Union[TestCase, tuple, list]]
-    dependencies: List[str] = Field(default_factory=list)  # List of package names
-    secrets: dict = Field(default_factory=dict)  # Environment variables/secrets
-    enable_network: bool = True  # Enable network access (deprecated, use network_config)
-    network_config: Optional[NetworkConfigRequest] = None  # Network filtering configuration
+    dependencies: List[str] = Field(default_factory=list)
+    secrets: dict = Field(default_factory=dict)
+    enable_network: bool = True
+    network_config: Optional[NetworkConfigRequest] = None
 
 
 class CodeExecutionResponse(BaseModel):
@@ -96,110 +55,38 @@ class CodeExecutionResponse(BaseModel):
     status: dict = {}
     exit_code: Optional[int] = None
     token: str
+    validated_dependencies: List[str] = Field(default_factory=list)
 
 
 @router.post("/run", response_model=CodeExecutionResponse)
 async def run_code(request: CodeExecutionRequest):
     """Execute code using Judge0 API"""
     try:
-        logger.info(f"Received request: code length={len(request.code)}, language={request.language}, "
-                   f"dependencies={request.dependencies}, secrets keys={list(request.secrets.keys())}")
-        
-        # Validate language
-        supported_langs = judge0_service.get_supported_languages()
-        if request.language.lower() not in supported_langs:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported language: {request.language}. "
-                       f"Supported: {', '.join(supported_langs)}"
-            )
-        
-        # Validate code is not empty
-        if not request.code or not request.code.strip():
-            raise HTTPException(
-                status_code=400,
-                detail="Code cannot be empty"
-            )
-        
-        # Ensure stdin is a string
-        stdin = request.stdin or ""
-        if not isinstance(stdin, str):
-            stdin = str(stdin)
-        
-        # Convert dependencies list to requirements.txt format (note: not fully supported in Judge0 CE)
-        requirements = None
-        if request.dependencies and len(request.dependencies) > 0:
-            requirements = "\n".join(request.dependencies)
-            logger.warning("Dependencies specified but may not be fully supported in Judge0 CE")
-        
-        # Handle encrypted secrets if provided
-        env_vars = None
-        if request.encrypted_secrets:
-            try:
-                crypto_service = get_crypto_service()
-                decrypted_secrets = crypto_service.decrypt_secrets(request.encrypted_secrets)
-                env_vars = {k: v for k, v in decrypted_secrets.items() if v}
-                logger.info(f"Decrypted {len(env_vars)} environment variables")
-            except ValueError as e:
-                logger.error(f"Failed to decrypt secrets: {e}")
-                raise HTTPException(status_code=400, detail="Failed to decrypt secrets. Invalid encryption.")
-        elif request.secrets:
-            # Fallback to unencrypted secrets (for backward compatibility)
-            env_vars = {k: v for k, v in request.secrets.items() if v}
-            if env_vars:
-                logger.warning("Using unencrypted secrets - consider using encrypted_secrets instead")
-        
-        if env_vars:
-            logger.info(f"Environment variables set: {list(env_vars.keys())}")
-        
-        # Build network configuration
-        network_config = None
-        if request.network_config:
-            # Validate allowed_hosts
-            validated_hosts = []
-            for host in request.network_config.allowed_hosts:
-                host = host.strip()
-                if host and _is_valid_host(host):
-                    validated_hosts.append(host)
-                elif host:
-                    logger.warning(f"Invalid host in allowlist: {host}")
-            
-            network_config = NetworkConfig(
-                enabled=request.network_config.enabled,
-                restricted=request.network_config.restricted,
-                allowed_hosts=validated_hosts,
-            )
-            logger.info(f"Network config: enabled={network_config.enabled}, restricted={network_config.restricted}, allowed_hosts={validated_hosts}")
-        elif not request.enable_network:
-            # Backward compatibility: if enable_network is False, disable network
-            network_config = NetworkConfig(enabled=False)
-            logger.info("Network disabled via enable_network=False")
-        
-        # Execute code
-        logger.debug(f"Executing code for language: {request.language}")
-        result = judge0_service.execute_code(
-            source_code=request.code,
-            language=request.language,
-            stdin=stdin,
-            requirements=requirements,
-            env_vars=env_vars,
-            network_config=network_config,
+        logger.info(
+            f"Received request: code length={len(request.code)}, language={request.language}, "
+            f"dependencies={request.dependencies}, secrets keys={list(request.secrets.keys())}"
         )
-        
-        # Log the execution result status
+
+        result = execution_service.execute(
+            code=request.code,
+            language=request.language,
+            dependencies=request.dependencies,
+            secrets=request.secrets,
+            encrypted_secrets=request.encrypted_secrets,
+            stdin=request.stdin,
+            network_config_request=request.network_config,
+            enable_network=request.enable_network,
+        )
+
         status_desc = result.get("status", {}).get("description", "Unknown")
         logger.info(f"Execution completed with status: {status_desc}")
-        
         return CodeExecutionResponse(**result)
-        
-    except ValueError as e:
-        logger.error(f"ValueError: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
+
+    except HTTPException:
+        raise
     except TimeoutError as e:
         logger.error(f"TimeoutError: {str(e)}")
         raise HTTPException(status_code=408, detail=str(e))
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Exception: {type(e).__name__}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Execution error: {str(e)}")
@@ -209,14 +96,6 @@ async def run_code(request: CodeExecutionRequest):
 async def run_code_with_tests(request: CodeExecutionWithTestsRequest):
     """Execute code with multiple test cases"""
     try:
-        # Validate language
-        if request.language.lower() not in judge0_service.get_supported_languages():
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported language: {request.language}"
-            )
-        
-        # Convert test cases to tuples
         test_cases = []
         for tc in request.test_cases:
             if isinstance(tc, dict):
@@ -225,41 +104,21 @@ async def run_code_with_tests(request: CodeExecutionWithTestsRequest):
                 test_cases.append(tuple(tc))
             else:
                 test_cases.append((tc.input, tc.expected_output))
-        
-        # Convert dependencies list to requirements.txt format
-        requirements = None
-        if request.dependencies:
-            requirements = "\n".join(request.dependencies)
-        
-        # Build network configuration
-        network_config = None
-        if request.network_config:
-            validated_hosts = [
-                host.strip() for host in request.network_config.allowed_hosts
-                if host.strip() and _is_valid_host(host.strip())
-            ]
-            network_config = NetworkConfig(
-                enabled=request.network_config.enabled,
-                restricted=request.network_config.restricted,
-                allowed_hosts=validated_hosts,
-            )
-        elif not request.enable_network:
-            network_config = NetworkConfig(enabled=False)
-        
-        # Execute with test cases
-        results = judge0_service.execute_with_test_cases(
-            source_code=request.code,
+
+        results = execution_service.execute_with_test_cases(
+            code=request.code,
             language=request.language,
             test_cases=test_cases,
-            requirements=requirements,
-            env_vars=request.secrets,  # Use secrets as environment variables
-            network_config=network_config,
+            dependencies=request.dependencies,
+            secrets=request.secrets,
+            network_config_request=request.network_config,
+            enable_network=request.enable_network,
         )
-        
+
         return {"results": results, "total": len(results)}
-        
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Execution error: {str(e)}")
 
@@ -274,9 +133,10 @@ async def get_encryption_key():
 @router.get("/languages")
 async def get_supported_languages():
     """Get list of supported programming languages"""
+    languages = execution_service.get_supported_languages()
     return {
-        "languages": judge0_service.get_supported_languages(),
-        "count": len(judge0_service.get_supported_languages())
+        "languages": languages,
+        "count": len(languages)
     }
 
 
@@ -284,8 +144,18 @@ async def get_supported_languages():
 async def get_languages_info():
     """Get detailed information about all supported languages from Judge0"""
     try:
-        return judge0_service.get_languages_info()
+        return execution_service.get_languages_info()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch languages: {str(e)}")
 
 
+@router.get("/packages/whitelist/{language}")
+async def get_package_whitelist(language: str):
+    """Expose allowed installable packages for a language"""
+    try:
+        return {
+            "language": language.lower(),
+            "whitelist": execution_service.get_package_whitelist(language)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load whitelist: {str(e)}")

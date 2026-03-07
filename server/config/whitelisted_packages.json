@@ -1,0 +1,22 @@
+{
+  "python": {
+    "exact": [
+      "numpy",
+      "pandas",
+      "matplotlib",
+      "scipy",
+      "requests",
+      "sympy",
+      "scikit-learn"
+    ],
+    "versioned": {
+      "numpy": ["1.26.4"],
+      "pandas": ["2.2.2"],
+      "matplotlib": ["3.8.4"],
+      "scipy": ["1.13.1"],
+      "requests": ["2.31.0"],
+      "sympy": ["1.12"],
+      "scikit-learn": ["1.5.0"]
+    }
+  }
+}
