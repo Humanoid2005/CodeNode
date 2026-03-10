@@ -1,0 +1,170 @@
+====================================================================
+COMMIT ANALYSIS REPORT
+Commit Hash: ad4098e
+Commit Message: added whitelist
+====================================================================
+
+1. RATIONALE FOR THE CHANGE
+--------------------------------------------------------------------
+Previously, the system installed a pre-defined set of Python packages 
+statically during the Docker image build process. There was no provision 
+to dynamically install additional Python packages at runtime. 
+
+This commit introduces a dynamic "whitelisting" feature. Instead of 
+installing everything at the build level, the system now selectively 
+allows user-requested Python packages to be installed right before code 
+execution - but ONLY if those packages (and specific versions) are 
+explicitly approved in a whitelist configuration. 
+
+This balances flexibility (allowing dynamic imports) with security 
+(preventing arbitrary or malicious package execution).
+
+
+2. FILES CHANGED (WHAT WAS ADDED, MODIFIED, AND DELETED)
+--------------------------------------------------------------------
+
+[NEW FILES ADDED]
+- server/config/whitelisted_packages.json:
+  Added a configuration file defining the exact packages (e.g., numpy, pandas) 
+  and explicit versions that are allowed to be installed. 
+  * Why it is needed: It acts as the "source of truth" database for what is 
+    allowed. It is just raw data/configuration, isolated from the code logic,
+    making it easy to maintain and update without touching the backend code.
+
+- server/services/package_whitelist_service.py:
+  Added a service dedicated to loading the JSON whitelist and validating 
+  incoming package requests using regular expressions and strict matching.
+  * Why it is needed: It acts as the parser and validator. While the JSON 
+    file just holds the data, this service reads the json, caches it, and 
+    contains the security logic to determine if a requested `pkg==version` 
+    matches any allowed rules. It safely sanitizes requests.
+
+- server/services/execution_service.py:
+  Added a higher-level orchestration service. 
+  * Why it is needed & how it differs from the JSON/whitelist service: 
+    This is the "coordinator" layer. The JSON file is the data, the whitelist 
+    service is the verifier, and the Judge0 service is the executor. The 
+    Execution Service ties them all together. When an API request comes in, 
+    the Execution Service intercepts it, passes the dependencies to the 
+    Whitelist Service for verification, and ONLY if they pass does it forward 
+    the execution to the Judge0 API. If dependencies fail verification, the 
+    Execution Service immediately blocks the request and returns an error to 
+    the user, preventing the code from ever reaching Judge0. 
+
+
+[MODIFIED FILES]
+- Dockerfile.judge0-cg2:
+  * Deleted: The static `pip install requests pillow sympy` step from the Dockerfile.
+  * Added: Modified the build process to download the isolate source code 
+    from a tarball release instead of cloning a git repository.
+
+- server/routes/code_execution.py:
+  * Deleted: The direct references and calls to the `Judge0Service`.
+  * Added: Replaced the execution logic to utilize the new `ExecutionService`, 
+    which ensures dependency validation occurs before execution.
+
+- server/services/judge0_service.py:
+  * Added: Python injection logic (`_inject_python_requirements`).
+  * Why it is needed: Once the dependencies are validated and approved by the 
+    Execution Service, Judge0 still needs a way to actually install them inside 
+    the secure sandbox container. This service dynamically prepends an auto-generated 
+    Python script to the user's code just before sending it to Judge0. This injected 
+    script uses `subprocess.check_call([sys.executable, "-m", "pip", "install", ...])` 
+    to install the whitelisted packages at runtime securely before the user's actual 
+    code runs.
+
+- server/main.py:
+  * Added: A centralized logging configuration. 
+  * Modified: Bumped the API version to 3.1.0 and added 
+    "whitelisted_package_installation" to the root health-check endpoint.
+
+- docker-compose.yml:
+  * Added: Added `depends_on` conditions for `judge0-workers` to ensure 
+    they wait for the `judge0-db` and `judge0-redis` containers to start.
+
+- server/requirements.txt:
+  * Modified: Minor formatting and newline fixes.
+
+
+3. LOCALHOST TESTING INSTRUCTIONS
+--------------------------------------------------------------------
+To test the whitelist feature locally, follow these steps:
+
+1. Start the Environment:
+   Start the backend server (ensure Judge0 containers are running via Docker if used):
+   ```bash
+   cd server
+   python3 -m venv venv
+   source venv/bin/activate  # (or .\venv\Scripts\activate on Windows)
+   pip install -r requirements.txt
+   
+   # Note for Windows users: If you hit a DLL load issue with `cryptography`,
+   # reinstall it and the `cffi` dependency with explicit versions:
+   # pip uninstall -y cryptography cffi
+   # pip install cffi==1.17.0 cryptography==42.0.0
+   
+   python main.py
+   ```
+
+2. Test Valid Dependency Execution:
+   Make a POST request to `/api/run` containing Python code that relies on a 
+   whitelisted package (e.g., `numpy`). Specify `numpy==1.26.4` in the `dependencies`.
+   - Expected Result: Code executes successfully. The `stdout` log will show 
+     "Installing approved dependencies: numpy==1.26.4" before outputting results.
+
+3. Test Blocked Dependency Execution:
+   Make another POST request to `/api/run`, this time specifying an unapproved 
+   dependency in the `dependencies` array (e.g., `django` or `flask`).
+   - Expected Result: Immediate 400 Bad Request error. The JSON response will contain 
+     a `message` stating "Some dependencies are not whitelisted or are invalid" along 
+     with specific details of the `rejected_dependencies`.
+
+4. Test Getting the Whitelist API:
+   Make a GET request to `/api/packages/whitelist/python`.
+   - Expected Result: Returns a JSON object detailing all the packages explicitly 
+     allowed by the `.json` configuration file, split by exact and versioned matches.
+    
+5. Test from localhost:
+
+import numpy as np
+print("NumPy version:", np.__version__)
+
+In the Dependencies field (where it says requests, pandas, numpy), type: numpy
+Click ▶ Execute
+
+Expected: Console output shows NumPy version after installing it.
+
+Test 2: Blocked Package (Should Fail ❌)
+
+import flask
+print("Flask loaded")
+
+In the Dependencies field, type: flask
+Click ▶ Execute
+Expected: You should get an error saying "Some dependencies are not 
+whitelisted or are invalid" with flask listed under rejected dependencies.
+
+
+Test 3: Mix of Allowed and Blocked
+In the Dependencies field, type: numpy, flask
+Click ▶ Execute
+Expected: Rejected because flask is not whitelisted — even though 
+numpy is allowed, the whole request is blocked if any dependency fails validation.
+
+
+{
+  "code": "import numpy as np\nprint('Successfully imported NumPy!')\nprint('NumPy version:', np.__version__)",
+  "language": "python",
+  "dependencies": [
+    "numpy==1.26.4"
+  ]
+}
+
+
+{
+  "code": "import django\nprint('Hello Django')",
+  "language": "python",
+  "dependencies": [
+    "django"
+  ]
+}

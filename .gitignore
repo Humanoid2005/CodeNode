@@ -36,3 +36,7 @@ dist/
 tmp/
 temp/
 *.tmp
+
+./whitelist_commit_report.txt
+
+
